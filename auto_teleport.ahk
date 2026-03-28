@@ -9,7 +9,8 @@ CoordMode "Pixel", "Screen"
 
 global ScriptEnabled := true
 global Config := LoadConfig()
-global LastProcessedHour := ""
+global LastTeleportHour := ""
+global LastExpCardHour := ""
 global LastWindowMissingHour := ""
 global OverlayGui := ""
 global LogFile := A_ScriptDir "\logs\automation.log"
@@ -18,36 +19,69 @@ EnsureRuntimePaths()
 ValidateTemplateAtStartup()
 SetTimer CheckSchedule, 1000
 Log("Script started.")
-TrayTip "传奇自动传送", "脚本已启动。F8 开关，F9 测试，F10 显示识别区域，Esc 退出。"
+TrayTip "传奇自动操作", "脚本已启动。F8 开关，F9 传送测试，F7 经验卡测试，F10 显示识别区域，Esc 退出。"
 
 F8::ToggleScript()
 F9::ManualRun()
+F7::ManualExpCardRun()
 F10::ShowSearchOverlay()
 Esc::ExitScript()
 
 CheckSchedule() {
-    global Config, ScriptEnabled, LastProcessedHour
+    global ScriptEnabled
 
     if !ScriptEnabled {
         return
     }
 
-    if !IsWithinTriggerWindow() {
-        return
-    }
-
-    currentHourKey := FormatTime(A_Now, "yyyyMMddHH")
-    if (LastProcessedHour = currentHourKey) {
-        return
-    }
-
-    if RunTeleportFlow("timer") {
-        LastProcessedHour := currentHourKey
-    }
+    RunScheduledTeleport()
+    RunScheduledExpCard()
 }
 
 ManualRun() {
     RunTeleportFlow("manual")
+}
+
+ManualExpCardRun() {
+    RunExpCardFlow("manual")
+}
+
+RunScheduledTeleport() {
+    global Config, LastTeleportHour
+
+    if !IsWithinTriggerWindow(Config.ActiveMinute, Config.PreTriggerSeconds, Config.PostTriggerSeconds) {
+        return
+    }
+
+    currentHourKey := FormatTime(A_Now, "yyyyMMddHH")
+    if (LastTeleportHour = currentHourKey) {
+        return
+    }
+
+    if RunTeleportFlow("timer") {
+        LastTeleportHour := currentHourKey
+    }
+}
+
+RunScheduledExpCard() {
+    global Config, LastExpCardHour
+
+    if !Config.ExpCardEnabled {
+        return
+    }
+
+    if !IsWithinTriggerWindow(Config.ExpCardActiveMinute, Config.ExpCardPreTriggerSeconds, Config.ExpCardPostTriggerSeconds) {
+        return
+    }
+
+    currentHourKey := FormatTime(A_Now, "yyyyMMddHH")
+    if (LastExpCardHour = currentHourKey) {
+        return
+    }
+
+    if RunExpCardFlow("timer") {
+        LastExpCardHour := currentHourKey
+    }
 }
 
 RunTeleportFlow(triggerSource := "manual") {
@@ -111,6 +145,61 @@ RunTeleportFlow(triggerSource := "manual") {
     return false
 }
 
+RunExpCardFlow(triggerSource := "manual") {
+    global Config, LastWindowMissingHour
+
+    if !Config.ExpCardEnabled {
+        Log("Exp card flow skipped because ExpCard.Enabled is off.")
+        if (triggerSource = "manual") {
+            MsgBox "经验卡功能未启用。请先在 config.ini 里把 [ExpCard] 的 Enabled 改成 1。", "传奇自动操作", "Icon!"
+        }
+        return false
+    }
+
+    if (Config.ExpCardX < 0 || Config.ExpCardY < 0) {
+        Log("Exp card flow skipped because ExpCardX/ExpCardY is not configured.")
+        if (triggerSource = "manual") {
+            MsgBox "经验卡坐标未配置。请先在 config.ini 里填写 [ExpCard] 的 RelativeX/RelativeY。", "传奇自动操作", "Icon!"
+        }
+        return false
+    }
+
+    hwnd := FindGameWindow()
+    if !hwnd {
+        hourKey := FormatTime(A_Now, "yyyyMMddHH")
+        if (LastWindowMissingHour != hourKey || triggerSource = "manual") {
+            Log("Game window not found for exp card flow: " Config.GameWindowTitle)
+            if (triggerSource = "manual") {
+                MsgBox "没有找到游戏窗口。请先确认 config.ini 里的 GameWindowTitle。", "传奇自动操作", "Icon!"
+            }
+            LastWindowMissingHour := hourKey
+        }
+        return false
+    }
+
+    if !EnsureWindowActive(hwnd) {
+        Log("Failed to activate game window for exp card flow.")
+        if (triggerSource = "manual") {
+            MsgBox "无法激活游戏窗口。", "传奇自动操作", "Icon!"
+        }
+        return false
+    }
+
+    clickPoint := GetWindowRelativePoint(hwnd, Config.ExpCardX, Config.ExpCardY)
+    if !clickPoint {
+        Log("Failed to compute exp card click point.")
+        if (triggerSource = "manual") {
+            MsgBox "无法计算经验卡点击坐标。", "传奇自动操作", "Icon!"
+        }
+        return false
+    }
+
+    DoubleClickPoint(clickPoint.x, clickPoint.y, Config.ExpCardDoubleClickIntervalMs)
+    Log(Format("Double-clicked exp card at screen ({1}, {2}) from relative ({3}, {4}).",
+        clickPoint.x, clickPoint.y, Config.ExpCardX, Config.ExpCardY))
+    return true
+}
+
 FindGameWindow() {
     global Config
 
@@ -166,6 +255,27 @@ GetSearchRect(hwnd) {
     }
 }
 
+GetWindowRelativePoint(hwnd, offsetX, offsetY) {
+    try {
+        WinGetPos &windowX, &windowY, &windowW, &windowH, "ahk_id " hwnd
+    } catch {
+        return false
+    }
+
+    if (windowW <= 0 || windowH <= 0) {
+        return false
+    }
+
+    if (offsetX >= windowW || offsetY >= windowH) {
+        return false
+    }
+
+    return {
+        x: windowX + offsetX,
+        y: windowY + offsetY
+    }
+}
+
 FindTeleportButton(region) {
     global Config
 
@@ -183,6 +293,13 @@ FindTeleportButton(region) {
 
 ClickTeleport(x, y) {
     MouseMove x, y, 0
+    Click
+}
+
+DoubleClickPoint(x, y, intervalMs := 120) {
+    MouseMove x, y, 0
+    Click
+    Sleep intervalMs
     Click
 }
 
@@ -247,17 +364,15 @@ ExitScript() {
     ExitApp
 }
 
-IsWithinTriggerWindow() {
-    global Config
-
+IsWithinTriggerWindow(activeMinute, preTriggerSeconds, postTriggerSeconds) {
     minute := A_Min + 0
     second := A_Sec + 0
     nowSeconds := minute * 60 + second
-    targetSeconds := Config.ActiveMinute * 60
+    targetSeconds := activeMinute * 60
 
     return (
-        nowSeconds >= targetSeconds - Config.PreTriggerSeconds
-        && nowSeconds <= targetSeconds + Config.PostTriggerSeconds
+        nowSeconds >= targetSeconds - preTriggerSeconds
+        && nowSeconds <= targetSeconds + postTriggerSeconds
     )
 }
 
@@ -284,6 +399,13 @@ LoadConfig() {
     config.RetryCount := ReadIniInt(configPath, "Click", "RetryCount", 3)
     config.RetryIntervalMs := ReadIniInt(configPath, "Click", "RetryIntervalMs", 900)
     config.PostClickVerifyDelayMs := ReadIniInt(configPath, "Click", "PostClickVerifyDelayMs", 700)
+    config.ExpCardEnabled := ReadIniInt(configPath, "ExpCard", "Enabled", 0)
+    config.ExpCardActiveMinute := ReadIniInt(configPath, "ExpCard", "ActiveMinute", 0)
+    config.ExpCardPreTriggerSeconds := ReadIniInt(configPath, "ExpCard", "PreTriggerSeconds", 5)
+    config.ExpCardPostTriggerSeconds := ReadIniInt(configPath, "ExpCard", "PostTriggerSeconds", 20)
+    config.ExpCardX := ReadIniInt(configPath, "ExpCard", "RelativeX", -1)
+    config.ExpCardY := ReadIniInt(configPath, "ExpCard", "RelativeY", -1)
+    config.ExpCardDoubleClickIntervalMs := ReadIniInt(configPath, "ExpCard", "DoubleClickIntervalMs", 120)
     config.ActivateTimeoutMs := ReadIniInt(configPath, "Window", "ActivateTimeoutMs", 2500)
     return config
 }
